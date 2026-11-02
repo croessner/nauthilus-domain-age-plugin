@@ -39,8 +39,8 @@ all: check build
 check: fmt-check vet lint test
 
 ## test: run race tests and reference activation checks inside the CORE_REF tree.
-test:
-	$(IN_CORE) test
+test: test-collector
+	NAUTHILUS_CZDS_TEST_INDEX="$(BUILD_DIR)/czds-fixture/com.idx" $(IN_CORE) test
 
 ## vet: go vet inside the CORE_REF tree.
 vet:
@@ -113,7 +113,7 @@ clean:
 	rm -rf "$(BUILD_DIR)"
 
 .PHONY: guardrails
-guardrails: check
+guardrails: test-collector check
 
 ## import: validate and optionally atomically install a normalized provider snapshot.
 .PHONY: import
@@ -127,3 +127,9 @@ govulncheck:
 
 ## release-guardrails: verify source, dependency vulnerabilities and native host ABI before publishing.
 release-guardrails: guardrails govulncheck build
+
+## test-collector: verify bounded CZDS acquisition contracts without external services.
+.PHONY: test-collector
+test-collector:
+	python3 -m unittest discover -s scripts -p test_czds.py
+	python3 scripts/czds-fixture.py --output "$(BUILD_DIR)/czds-fixture"

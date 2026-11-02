@@ -1,0 +1,11 @@
+# The official runtime digest fixes the Python, SQLite and TLS implementations.
+FROM python:3.14-alpine3.24@sha256:eb2c62658b8d51bff0acc408504b76521d02030de56a8a3c1e830083e89b89d2
+LABEL org.opencontainers.image.source="https://github.com/croessner/nauthilus-domain-age-plugin"
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY scripts/czds.py /app/czds.py
+COPY scripts/test_czds.py /app/test_czds.py
+COPY scripts/czds-fixture.py scripts/benchmark-czds.py /app/
+RUN python3 -m unittest discover -s /app -p test_czds.py
+USER 1500:1500
+ENTRYPOINT ["python3", "/app/czds.py"]

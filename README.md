@@ -67,3 +67,8 @@ No independent go.mod: Go plugins require the exact host dependency/package iden
 Roll back by disabling the module/provider activation and restoring the previous compatible signed artifact plus its configuration. Removing/replacing Go shared objects requires a process restart. Changes to the maintained data snapshot can be rolled back by atomic import and reconfiguration.
 
 Licensed under GPL-3.0-or-later.
+
+## Optional CZDS acquisition
+
+The [CZDS operator guide](CZDS.md) covers account approvals, private credentials,
+bounded daily zone collection and independent zone-observation evidence.

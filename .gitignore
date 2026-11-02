@@ -6,3 +6,6 @@ build/
 /data/
 /downloads/
 /secrets/
+
+__pycache__/
+*.pyc

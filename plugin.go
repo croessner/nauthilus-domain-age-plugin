@@ -23,6 +23,7 @@ var buildCommit, buildTime, buildTags = valueUnknown, valueUnknown, "netgo"
 
 // configuration owns operator inputs; endpoint maps are immutable after registration.
 type configuration struct {
+	CZDSDirectory          string            `mapstructure:"czds_directory"`
 	RDAPBootstrapUpdatedAt string            `mapstructure:"rdap_bootstrap_updated_at"`
 	Database               string            `mapstructure:"database"`
 	RDAP                   map[string]string `mapstructure:"rdap"`
@@ -34,6 +35,8 @@ type configuration struct {
 
 // Plugin coordinates immutable imports and optional bounded online enrichment.
 type Plugin struct {
+	czdsCancel      context.CancelFunc
+	czds            *czdsStore
 	bootstrapCancel context.CancelFunc
 	data            *snapshot
 	rdap            *rdapClient
@@ -47,7 +50,7 @@ func NauthilusPlugin() (api.Plugin, error) { return &Plugin{}, nil }
 
 // Metadata declares a fact-only decision component and optional observation effect.
 func (*Plugin) Metadata() api.Metadata {
-	return api.Metadata{Name: "domain_age", Version: "0.1.2", APIVersion: api.APIVersion, Description: "Domain registration and independent first-seen intelligence", Features: []api.Feature{"decision_fact_provider", "decision_effect_provider", "reconfigure"}, Build: api.BuildInfo{ArtifactIdentity: api.NativeArtifactIdentity(), GoVersion: runtime.Version(), GitCommit: buildCommit, BuildTime: buildTime, BuildTags: []string{buildTags}}}
+	return api.Metadata{Name: "domain_age", Version: "0.1.3", APIVersion: api.APIVersion, Description: "Domain registration and independent first-seen intelligence", Features: []api.Feature{"decision_fact_provider", "decision_effect_provider", "reconfigure"}, Build: api.BuildInfo{ArtifactIdentity: api.NativeArtifactIdentity(), GoVersion: runtime.Version(), GitCommit: buildCommit, BuildTime: buildTime, BuildTags: []string{buildTags}}}
 }
 
 // Register validates all inputs before exposing a complete assessment component.
@@ -80,6 +83,10 @@ func (p *Plugin) Register(registrar api.Registrar) error {
 	}
 
 	p.data, p.rdap, p.config = data, rdap, cfg
+	if cfg.CZDSDirectory != "" {
+		p.czds = &czdsStore{files: make(map[string]*czdsIndex), slots: make(chan struct{}, 4)}
+	}
+
 	if err = decision.RegisterDecisionFactProvider(assessment{p}); err != nil {
 		return err
 	}
@@ -111,6 +118,10 @@ func (p *Plugin) Start(ctx context.Context, host api.Host) error {
 	p.host = host
 	p.mu.Unlock()
 
+	if p.czds != nil {
+		p.startCZDS(host)
+	}
+
 	if p.config.AutomaticRDAPBootstrap {
 		p.startBootstrap(host)
 	}
@@ -120,6 +131,10 @@ func (p *Plugin) Start(ctx context.Context, host api.Host) error {
 
 // Stop releases pooled outbound connections after host request draining.
 func (p *Plugin) Stop(context.Context) error {
+	if p.czdsCancel != nil {
+		p.czdsCancel()
+	}
+
 	if p.bootstrapCancel != nil {
 		p.bootstrapCancel()
 	}
@@ -182,6 +197,7 @@ func (a assessment) Collect(ctx context.Context, request api.DecisionFactRequest
 
 	record, found := data.byDomain[domain]
 	mergeImport(values, record, found, now, cfg.MaxAge)
+	p.mergeCZDS(ctx, values, domain, record, now, cfg.MaxAge)
 
 	if (!found || record.RegisteredAt == nil || values[valueRegistrationState] == valueStale) && (len(cfg.RDAP) > 0 || cfg.AutomaticRDAPBootstrap) {
 		result := rdapResult{state: stateBootstrapStale}
@@ -275,7 +291,7 @@ func (p *Plugin) prepareReplacement(input api.ConfigView) (configuration, *snaps
 	old := p.config
 	p.mu.RUnlock()
 
-	if cfg.Tracking != old.Tracking || cfg.AutomaticRDAPBootstrap != old.AutomaticRDAPBootstrap || !reflect.DeepEqual(cfg.RDAP, old.RDAP) {
+	if cfg.CZDSDirectory != old.CZDSDirectory || cfg.Tracking != old.Tracking || cfg.AutomaticRDAPBootstrap != old.AutomaticRDAPBootstrap || !reflect.DeepEqual(cfg.RDAP, old.RDAP) {
 		return cfg, nil, fmt.Errorf("service configuration: %w", api.ErrRestartRequired)
 	}
 
