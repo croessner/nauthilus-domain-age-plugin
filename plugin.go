@@ -26,7 +26,8 @@ type configuration struct {
 	RDAPBootstrapUpdatedAt string            `mapstructure:"rdap_bootstrap_updated_at"`
 	Database               string            `mapstructure:"database"`
 	RDAP                   map[string]string `mapstructure:"rdap"`
-	MaxAge                 time.Duration     `mapstructure:"max_age"`
+	MaxAgeText             string            `mapstructure:"max_age"`
+	MaxAge                 time.Duration     `mapstructure:"-"`
 	Tracking               bool              `mapstructure:"tracking"`
 	AutomaticRDAPBootstrap bool              `mapstructure:"automatic_rdap_bootstrap"`
 }
@@ -46,18 +47,14 @@ func NauthilusPlugin() (api.Plugin, error) { return &Plugin{}, nil }
 
 // Metadata declares a fact-only decision component and optional observation effect.
 func (*Plugin) Metadata() api.Metadata {
-	return api.Metadata{Name: "domain_age", Version: "0.1.1", APIVersion: api.APIVersion, Description: "Domain registration and independent first-seen intelligence", Features: []api.Feature{"decision_fact_provider", "decision_effect_provider", "reconfigure"}, Build: api.BuildInfo{ArtifactIdentity: api.NativeArtifactIdentity(), GoVersion: runtime.Version(), GitCommit: buildCommit, BuildTime: buildTime, BuildTags: []string{buildTags}}}
+	return api.Metadata{Name: "domain_age", Version: "0.1.2", APIVersion: api.APIVersion, Description: "Domain registration and independent first-seen intelligence", Features: []api.Feature{"decision_fact_provider", "decision_effect_provider", "reconfigure"}, Build: api.BuildInfo{ArtifactIdentity: api.NativeArtifactIdentity(), GoVersion: runtime.Version(), GitCommit: buildCommit, BuildTime: buildTime, BuildTags: []string{buildTags}}}
 }
 
 // Register validates all inputs before exposing a complete assessment component.
 func (p *Plugin) Register(registrar api.Registrar) error {
-	cfg := configuration{MaxAge: 48 * time.Hour}
-	if err := registrar.Config().Decode(&cfg); err != nil {
+	cfg, err := decodeConfiguration(registrar.Config())
+	if err != nil {
 		return err
-	}
-
-	if cfg.MaxAge < time.Minute || cfg.MaxAge > 30*24*time.Hour {
-		return errInput
 	}
 
 	data, err := loadSnapshot(cfg.Database)
@@ -269,8 +266,8 @@ func (p *Plugin) ValidateReconfigure(_ context.Context, input api.ConfigView) er
 
 // prepareReplacement keeps registration-time services fixed and validates the entire replacement.
 func (p *Plugin) prepareReplacement(input api.ConfigView) (configuration, *snapshot, error) {
-	cfg := configuration{MaxAge: 48 * time.Hour}
-	if err := input.Decode(&cfg); err != nil {
+	cfg, err := decodeConfiguration(input)
+	if err != nil {
 		return cfg, nil, err
 	}
 
@@ -282,10 +279,6 @@ func (p *Plugin) prepareReplacement(input api.ConfigView) (configuration, *snaps
 		return cfg, nil, fmt.Errorf("service configuration: %w", api.ErrRestartRequired)
 	}
 
-	if cfg.MaxAge < time.Minute || cfg.MaxAge > 30*24*time.Hour {
-		return cfg, nil, errInput
-	}
-
 	if err := validateBootstrap(cfg); err != nil {
 		return cfg, nil, err
 	}
@@ -293,6 +286,29 @@ func (p *Plugin) prepareReplacement(input api.ConfigView) (configuration, *snaps
 	data, err := loadSnapshot(cfg.Database)
 
 	return cfg, data, err
+}
+
+// decodeConfiguration parses duration text explicitly because the host decoder has no duration hook.
+func decodeConfiguration(input api.ConfigView) (configuration, error) {
+	cfg := configuration{MaxAge: 48 * time.Hour}
+	if err := input.Decode(&cfg); err != nil {
+		return cfg, err
+	}
+
+	if cfg.MaxAgeText != "" {
+		value, err := time.ParseDuration(cfg.MaxAgeText)
+		if err != nil {
+			return cfg, fmt.Errorf("max_age: %w", err)
+		}
+
+		cfg.MaxAge = value
+	}
+
+	if cfg.MaxAge < time.Minute || cfg.MaxAge > 30*24*time.Hour {
+		return cfg, errInput
+	}
+
+	return cfg, nil
 }
 
 // Reconfigure atomically publishes validated imports, preserving the previous snapshot on failure.

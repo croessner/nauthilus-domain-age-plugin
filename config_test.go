@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/croessner/nauthilus/v4/server/config/policyconfig"
 	"github.com/croessner/nauthilus/v4/server/policy/configinput"
@@ -75,6 +76,35 @@ func TestReferencePolicyNormalizes(t *testing.T) {
 
 	if err = preparation.Bindings.ValidateCatalog(catalog); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestHostConfigDecodesDuration uses the real strict host decoder rather than a typed test stub.
+func TestHostConfigDecodesDuration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domains.json")
+	writeSnapshotFixture(t, path)
+
+	p := &Plugin{config: configuration{Database: path, MaxAge: 48 * time.Hour}}
+	for _, item := range []struct {
+		value string
+		want  time.Duration
+		valid bool
+	}{
+		{"48h", 48 * time.Hour, true},
+		{"1m", time.Minute, true},
+		{"", 48 * time.Hour, true},
+		{"invalid", 0, false},
+		{"1s", 0, false},
+		{"744h", 0, false},
+	} {
+		t.Run(item.value, func(t *testing.T) {
+			view := pluginregistry.NewConfigView(map[string]any{"database": path, "max_age": item.value})
+
+			cfg, _, err := p.prepareReplacement(view)
+			if (err == nil) != item.valid || (item.valid && cfg.MaxAge != item.want) {
+				t.Fatalf("host duration decode: max_age=%s error=%v", cfg.MaxAge, err)
+			}
+		})
 	}
 }
 
