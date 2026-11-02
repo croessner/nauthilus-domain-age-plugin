@@ -1,0 +1,750 @@
+{
+  "policy": {
+    "api": {
+      "enabled": true,
+      "http": {
+        "enabled": true
+      },
+      "clients": [
+        {
+          "principal": "postfix-domain-age",
+          "authentication_kinds": [
+            "basic"
+          ],
+          "authentication": {
+            "basic": {
+              "username": "postfix-domain-age",
+              "password": "${POLICY_DOMAIN_AGE_PASSWORD}"
+            }
+          },
+          "targets": [
+            {
+              "namespace": "mail",
+              "actions": [
+                "assess-sender-domain",
+                "observe-sender-domain"
+              ]
+            }
+          ],
+          "allowed_schemas": [
+            "mail/assess-sender-domain/v1",
+            "mail/observe-sender-domain/v1"
+          ],
+          "allowed_resource_attributes": [
+            "mail.sender_domain",
+            "mail.observation_id"
+          ],
+          "allowed_environment_attributes": [
+            "mail.client_ip",
+            "mail.instance",
+            "mail.protocol_state"
+          ],
+          "allowed_subject_attributes": [],
+          "allowed_input_attributes": [],
+          "max_concurrency": 16,
+          "requests_per_second": 50,
+          "max_request_bytes": 16384,
+          "max_facts": 32
+        }
+      ],
+      "limits": {
+        "per_client_concurrency": 16,
+        "per_client_requests_per_second": 50,
+        "max_request_bytes": 16384,
+        "max_facts": 64,
+        "max_string_bytes": 4096,
+        "evaluation_timeout": "3s",
+        "provider_timeout": "2s"
+      }
+    },
+    "namespaces": {
+      "mail": {
+        "providers": {
+          "assessment": {
+            "kind": "native",
+            "module": "domain_age",
+            "component": "assessment",
+            "failure": "indeterminate",
+            "timeout": "2s",
+            "targets": [
+              {
+                "action": "assess-sender-domain"
+              },
+              {
+                "action": "observe-sender-domain"
+              }
+            ],
+            "produced_facts": [
+              "plugin.domain_age.observation_window_start_unix",
+              "plugin.domain_age.observation_window_seconds",
+              "plugin.domain_age.domain",
+              "plugin.domain_age.registration_state",
+              "plugin.domain_age.registration_source",
+              "plugin.domain_age.registration_age_seconds",
+              "plugin.domain_age.external_first_seen_age_seconds",
+              "plugin.domain_age.external_first_seen_state",
+              "plugin.domain_age.external_first_seen_source",
+              "plugin.domain_age.data_age_seconds",
+              "plugin.domain_age.data_stale",
+              "plugin.domain_age.registration_data_age_seconds",
+              "plugin.domain_age.external_data_age_seconds",
+              "plugin.domain_age.tracking_state",
+              "plugin.domain_age.local_first_seen_age_seconds",
+              "plugin.domain_age.observations"
+            ]
+          },
+          "observation": {
+            "kind": "native",
+            "module": "domain_age",
+            "component": "observation",
+            "targets": [
+              {
+                "action": "observe-sender-domain"
+              }
+            ],
+            "executions": [
+              "host_sync"
+            ],
+            "failure": "indeterminate",
+            "timeout": "400ms"
+          }
+        },
+        "effects": {
+          "record": {
+            "kind": "obligation",
+            "provider": "mail/plugin.domain_age.observation",
+            "targets": [
+              {
+                "action": "observe-sender-domain"
+              }
+            ],
+            "execution": "host_sync"
+          }
+        },
+        "domain_plans": {
+          "domain_age": {
+            "checkpoints": {
+              "final_decision": {
+                "providers": [
+                  {
+                    "name": "assessment",
+                    "use": "mail/plugin.domain_age.assessment"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "policy_sets": {
+          "assess-sender-domain": {
+            "visibility": "private",
+            "rules": [
+              {
+                "name": "recent_registration",
+                "checkpoint": "final_decision",
+                "require_providers": [
+                  "assessment"
+                ],
+                "if": {
+                  "all": [
+                    {
+                      "attribute": "plugin.domain_age.registration_state",
+                      "eq": "known"
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_age_seconds",
+                      "lt": 604800
+                    }
+                  ]
+                },
+                "then": {
+                  "decision": "deny",
+                  "reason": "recent_registration"
+                }
+              },
+              {
+                "name": "newly_active_domain_burst",
+                "checkpoint": "final_decision",
+                "require_providers": [
+                  "assessment"
+                ],
+                "if": {
+                  "all": [
+                    {
+                      "attribute": "plugin.domain_age.tracking_state",
+                      "in": [
+                        "known",
+                        "saturated"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.observations",
+                      "gte": 100
+                    },
+                    {
+                      "any": [
+                        {
+                          "attribute": "plugin.domain_age.local_first_seen_age_seconds",
+                          "lt": 86400
+                        },
+                        {
+                          "all": [
+                            {
+                              "attribute": "plugin.domain_age.external_first_seen_state",
+                              "eq": "known"
+                            },
+                            {
+                              "attribute": "plugin.domain_age.external_first_seen_age_seconds",
+                              "lt": 604800
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "decision": "deny",
+                  "reason": "newly_active_domain_burst"
+                }
+              },
+              {
+                "name": "assessed_domain",
+                "checkpoint": "final_decision",
+                "require_providers": [
+                  "assessment"
+                ],
+                "if": {
+                  "attribute": "plugin.domain_age.domain",
+                  "ne": ""
+                },
+                "then": {
+                  "decision": "permit",
+                  "reason": "assessment_complete"
+                }
+              }
+            ]
+          },
+          "observe-sender-domain": {
+            "visibility": "private",
+            "rules": [
+              {
+                "name": "recent_registration",
+                "checkpoint": "final_decision",
+                "require_providers": [
+                  "assessment"
+                ],
+                "if": {
+                  "all": [
+                    {
+                      "attribute": "plugin.domain_age.registration_state",
+                      "eq": "known"
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_age_seconds",
+                      "lt": 604800
+                    }
+                  ]
+                },
+                "then": {
+                  "decision": "deny",
+                  "reason": "recent_registration",
+                  "obligations": [
+                    {
+                      "id": "mail/record"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "newly_active_domain_burst",
+                "checkpoint": "final_decision",
+                "require_providers": [
+                  "assessment"
+                ],
+                "if": {
+                  "all": [
+                    {
+                      "attribute": "plugin.domain_age.tracking_state",
+                      "in": [
+                        "known",
+                        "saturated"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.observations",
+                      "gte": 100
+                    },
+                    {
+                      "any": [
+                        {
+                          "attribute": "plugin.domain_age.local_first_seen_age_seconds",
+                          "lt": 86400
+                        },
+                        {
+                          "all": [
+                            {
+                              "attribute": "plugin.domain_age.external_first_seen_state",
+                              "eq": "known"
+                            },
+                            {
+                              "attribute": "plugin.domain_age.external_first_seen_age_seconds",
+                              "lt": 604800
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "then": {
+                  "decision": "deny",
+                  "reason": "newly_active_domain_burst",
+                  "obligations": [
+                    {
+                      "id": "mail/record"
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "assessed_domain",
+                "checkpoint": "final_decision",
+                "require_providers": [
+                  "assessment"
+                ],
+                "if": {
+                  "attribute": "plugin.domain_age.domain",
+                  "ne": ""
+                },
+                "then": {
+                  "decision": "permit",
+                  "reason": "assessment_complete",
+                  "obligations": [
+                    {
+                      "id": "mail/record"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        "schema_contributions": {
+          "static": {
+            "assess-sender-domain": {
+              "versions": {
+                "v1": {
+                  "facts": [
+                    {
+                      "attribute": "resource.mail.sender_domain",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 253,
+                      "required": true
+                    },
+                    {
+                      "attribute": "environment.mail.client_ip",
+                      "category": "environment",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "environment.mail.instance",
+                      "category": "environment",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "environment.mail.protocol_state",
+                      "category": "environment",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.observation_window_start_unix",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.observation_window_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.domain",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_state",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_source",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.external_first_seen_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.external_first_seen_state",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.external_first_seen_source",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.data_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.data_stale",
+                      "category": "resource",
+                      "type": "boolean",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_data_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.external_data_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.tracking_state",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.local_first_seen_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.observations",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            "observe-sender-domain": {
+              "versions": {
+                "v1": {
+                  "facts": [
+                    {
+                      "attribute": "resource.mail.sender_domain",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 253,
+                      "required": true
+                    },
+                    {
+                      "attribute": "environment.mail.client_ip",
+                      "category": "environment",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "environment.mail.instance",
+                      "category": "environment",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "environment.mail.protocol_state",
+                      "category": "environment",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.observation_window_start_unix",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.observation_window_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.domain",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_state",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_source",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.external_first_seen_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.external_first_seen_state",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.external_first_seen_source",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.data_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.data_stale",
+                      "category": "resource",
+                      "type": "boolean",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.registration_data_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.external_data_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.tracking_state",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "plugin"
+                      ],
+                      "max_length": 256
+                    },
+                    {
+                      "attribute": "plugin.domain_age.local_first_seen_age_seconds",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "plugin.domain_age.observations",
+                      "category": "resource",
+                      "type": "integer",
+                      "allowed_sources": [
+                        "plugin"
+                      ]
+                    },
+                    {
+                      "attribute": "resource.mail.observation_id",
+                      "category": "resource",
+                      "type": "string",
+                      "allowed_sources": [
+                        "caller"
+                      ],
+                      "max_length": 128,
+                      "required": true
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "targets": [
+      {
+        "namespace": "mail",
+        "action": "assess-sender-domain",
+        "mode": "enforce",
+        "schema": "mail/assess-sender-domain/v1",
+        "domain_plan": "mail/domain_age",
+        "default_policy": "mail/assess-sender-domain",
+        "plans": {
+          "final_decision": {
+            "policy_sets": [
+              "mail/assess-sender-domain"
+            ]
+          }
+        },
+        "no_match": "deny",
+        "timeouts": {
+          "evaluation": "3s",
+          "provider_default": "2s"
+        }
+      },
+      {
+        "namespace": "mail",
+        "action": "observe-sender-domain",
+        "mode": "enforce",
+        "schema": "mail/observe-sender-domain/v1",
+        "domain_plan": "mail/domain_age",
+        "default_policy": "mail/observe-sender-domain",
+        "plans": {
+          "final_decision": {
+            "policy_sets": [
+              "mail/observe-sender-domain"
+            ]
+          }
+        },
+        "no_match": "deny",
+        "timeouts": {
+          "evaluation": "3s",
+          "provider_default": "2s"
+        }
+      }
+    ]
+  }
+}

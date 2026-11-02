@@ -1,0 +1,7 @@
+# Prefer the policy endpoint for full SMTP envelope context and counting.
+# Merge with existing restrictions; preserve independent relay controls.
+smtpd_end_of_data_restrictions = check_policy_service inet:127.0.0.1:10045
+
+# Alternative domain/address-only lookup, without observation counting or peer context.
+# Do not activate both alternatives for the same domain check by default.
+# smtpd_sender_restrictions = check_sender_access socketmap:inet:127.0.0.1:10046:domain_age

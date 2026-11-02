@@ -1,0 +1,14 @@
+{
+  "generated_at": "2026-11-02T08:00:00Z",
+  "records": [
+    {
+      "domain": "example.com",
+      "registered_at": "1995-08-14T00:00:00Z",
+      "registered_checked_at": "2026-11-02T07:00:00Z",
+      "registered_source": "operator-example",
+      "first_seen": "2026-10-01T00:00:00Z",
+      "first_seen_checked_at": "2026-11-02T07:00:00Z",
+      "first_seen_source": "passive-dns-example"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+plugins:
+  verification_policy: signature_required
+  allowed_dirs: [/usr/local/lib/nauthilus/plugins]
+  trust:
+    signers:
+      - id: domain-age-release
+        format: minisign
+        public_key_file: /etc/nauthilus/plugin-keys/domain-age.pub
+  modules:
+    - name: domain_age
+      type: go
+      path: /usr/local/lib/nauthilus/plugins/domain-age.so
+      signature: minisign:/usr/local/lib/nauthilus/plugins/domain-age.so.minisig
+      signer: domain-age-release
+      optional: false
+      config:
+        database: /var/lib/nauthilus/domain-age.json
+        max_age: 48h
+        tracking: true
+        rdap: {}
+        # Optional: refresh these operator-pinned IANA registry routes within 30 days.
+        # rdap_bootstrap_updated_at: "2026-11-02T08:00:00Z"
+        # rdap:
+        #   com: https://rdap.verisign.com/com/v1

@@ -1,0 +1,16 @@
+{
+  "version": "1",
+  "request_id": "example",
+  "target": {
+    "namespace": "mail",
+    "action": "assess-sender-domain"
+  },
+  "resource": {
+    "type": "mail-domain",
+    "attributes": {
+      "mail.sender_domain": {
+        "string": "example.com"
+      }
+    }
+  }
+}

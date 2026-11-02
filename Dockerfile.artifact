@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1.7
+
+FROM alpine:3.24
+
+ARG ARTIFACT=domain-age.so
+
+LABEL org.opencontainers.image.source="https://github.com/croessner/nauthilus-domain-age"
+LABEL org.opencontainers.image.description="Signed domain-age native plugin artifact set for one exact Nauthilus release"
+LABEL org.opencontainers.image.licenses="GPL-3.0-or-later"
+
+RUN mkdir -p /artifacts
+
+COPY build/${ARTIFACT} /artifacts/${ARTIFACT}
+COPY build/${ARTIFACT}.minisig /artifacts/${ARTIFACT}.minisig
+COPY build/${ARTIFACT}.sha256 /artifacts/${ARTIFACT}.sha256
+COPY build/${ARTIFACT}.provenance /artifacts/${ARTIFACT}.provenance
+
+RUN chmod 0444 /artifacts/*
+
+USER 65532:65532

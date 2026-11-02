@@ -1,0 +1,29 @@
+# Merge into the existing pfxhttp configuration. Keep credentials out of Git.
+server:
+  listen:
+    - kind: policy_service
+      name: domain_age
+      type: tcp
+      address: 127.0.0.1
+      port: 10045
+    - kind: socket_map
+      type: tcp
+      address: 127.0.0.1
+      port: 10046
+policy_services:
+  domain_age:
+    target: https://auth.example/api/v1/policy/decisions
+    http_auth_basic: postfix-domain-age:REPLACE_ME
+    decision:
+      enabled: true
+      namespace: mail
+      action: observe-sender-domain
+      observation_scope: mx1.example
+socket_maps:
+  domain_age:
+    target: https://auth.example/api/v1/policy/decisions
+    http_auth_basic: postfix-domain-age:REPLACE_ME
+    decision:
+      enabled: true
+      namespace: mail
+      action: assess-sender-domain

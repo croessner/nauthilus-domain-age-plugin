@@ -1,0 +1,8 @@
+build/
+
+.env
+*.key
+*.b64
+/data/
+/downloads/
+/secrets/
