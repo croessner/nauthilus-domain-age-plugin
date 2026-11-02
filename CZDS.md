@@ -46,8 +46,10 @@ history merge. Temporary sort files use the state directory and count toward
 the budget even when unlinked but still open on Linux. See the
 [SQLite temporary-file documentation](https://sqlite.org/tempfiles.html).
 Allow peak space for raw/unique staging, sort runs, history and rollback journal together. Measure a
-real baseline before enabling unattended collection; the limits are safety
-ceilings, not a claim that every future zone will fit or finish in six hours.
+representative large workload before enabling unattended collection, then
+verify the first real baseline measurements as registry approvals permit.
+The limits are safety ceilings, not a claim that every future zone will fit
+or finish in six hours.
 
 Full history remains local. Only first observations from the last 90 days are
 published, capped at ten million records across all zones (400 MB of records).
