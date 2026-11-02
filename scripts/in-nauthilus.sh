@@ -77,6 +77,9 @@ cd "${CORE_WORKDIR}"
 echo "core ref ${CORE_REF} ($(git rev-parse HEAD)), $(${GO} version)"
 
 case "${action}" in
+	govulncheck)
+		govulncheck -mode=source -scan=package -tags="${GO_TAGS}" ${plugin_pkgs}
+		;;
 	import)
 		: "${INPUT:?INPUT is required}"
 		"${GO}" run -mod=vendor -tags="${GO_TAGS}" "./${plugin_path}" -input "${INPUT}" -output "${OUTPUT:-}"

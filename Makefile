@@ -116,3 +116,11 @@ guardrails: check
 .PHONY: import
 import:
 	@INPUT="$(INPUT)" OUTPUT="$(OUTPUT)" $(IN_CORE) import
+
+## govulncheck: analyze the exact-core plugin package using the installed vulnerability checker.
+.PHONY: govulncheck release-guardrails
+govulncheck:
+	$(IN_CORE) govulncheck
+
+## release-guardrails: verify source, dependency vulnerabilities and native host ABI before publishing.
+release-guardrails: guardrails govulncheck build
