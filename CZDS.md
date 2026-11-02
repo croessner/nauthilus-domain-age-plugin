@@ -36,11 +36,16 @@ and the acquisition timestamp in one transaction. Publication follows that
 commit and is regenerated before another download after restart. Publication
 uses file and parent-directory synchronization and atomic replacement.
 
-Limits are 12 GiB per SQLite database, 40 GiB for the complete local state,
+Limits are 12 GiB for history, 16 GiB for disposable staging, 40 GiB for the complete local state,
 20 GiB minimum host-free reserve, 8 GiB compressed and 64 GiB decompressed per
 zone, 64 KiB per line/notice capture, a six-hour run deadline, and bounded
 SQLite caches. A local PV capacity field does not enforce these limits.
-Allow peak space for history, stage and rollback journal together. Measure a
+Append raw hashes before loading the unique stage in hash order through SQLite's on-disk sorter; adjacent duplicate delegations are suppressed, and SQL
+still deduplicates non-adjacent hashes. Compact the stage before the ordered
+history merge. Temporary sort files use the state directory and count toward
+the budget even when unlinked but still open on Linux. See the
+[SQLite temporary-file documentation](https://sqlite.org/tempfiles.html).
+Allow peak space for raw/unique staging, sort runs, history and rollback journal together. Measure a
 real baseline before enabling unattended collection; the limits are safety
 ceilings, not a claim that every future zone will fit or finish in six hours.
 
@@ -80,7 +85,10 @@ enrollment helper accepts the existing password through a hidden terminal
 prompt and writes only SOPS ciphertext; never paste credentials into chat.
 The ICANN token stays in process memory. HTTPS destinations are fixed, proxies
 and redirects are disabled, and neither response bodies nor credentials are
-logged. Credentials are not needed for synthetic validation.
+logged. Authenticate for link listing and before each eligible download, at
+most eleven times per run; a long import never reuses an expired token for
+the next zone. Data requests are never retried. Credentials are not needed
+for synthetic validation.
 
 Review plausible minimum delegation counts for every zone before initial
 acquisition. The example thresholds are safeguards to review, not current

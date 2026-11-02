@@ -1,9 +1,11 @@
 """Exercise acquisition semantics without contacting ICANN."""
 import gzip
 import io
+import os
 from pathlib import Path
 import struct
 import sqlite3
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -21,6 +23,46 @@ def zone_file(names):
 
 class CollectorContract(unittest.TestCase):
     """Keep baselines, historic observations and publications independent."""
+
+    def test_each_eligible_download_has_fresh_authentication(self):
+        """Long zone processing cannot leave the next download with an expired token."""
+        class ExpiringClient:
+            """Model a token that expires during processing of each completed zone."""
+
+            def __init__(self):
+                """Keep authentication state independent of test account files."""
+                self.fresh=False
+                self.logins=0
+
+            def authenticate(self):
+                """Issue one fresh token without exposing a credential value."""
+                self.fresh=True
+                self.logins+=1
+
+            def links(self):
+                """Return two approved zones so a long first import affects the second."""
+                return {zone:czds.API+'/czds/downloads/'+zone+'.zone' for zone in ['com','org']}
+
+            def get(self,url):
+                """Require a fresh token before a new data transfer starts."""
+                if not self.fresh:
+                    raise ValueError('expired test token')
+                self.fresh=False
+                return io.BytesIO(b'unused synthetic body')
+
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            original=czds.Store
+            store=original(root,reserve_bytes=0)
+            store.initialize()
+            store.close()
+            minimum=root/'counts.json'
+            minimum.write_text(czds.json.dumps({zone:1000 for zone in czds.ZONES}))
+            client=ExpiringClient()
+            arguments=['czds','--state',str(root),'--output',str(root/'pub'),'--credentials','unused','--minimum-counts',str(minimum)]
+            with mock.patch.object(sys,'argv',arguments),mock.patch.object(czds,'Client',return_value=client),mock.patch.object(czds,'Store',side_effect=lambda path,reporter=None:original(path,reserve_bytes=0,reporter=reporter)),mock.patch.object(original,'ingest'),mock.patch.object(czds.signal,'signal'),mock.patch.object(czds.signal,'alarm'),mock.patch.object(czds,'RUN_DEADLINE',None),mock.patch.object(czds,'DEADLINE_EXPIRED',False):
+                czds.main()
+            self.assertLessEqual(client.logins,1+len(czds.ZONES))
 
     def test_baseline_addition_reappearance(self):
         """Initial domains stay unknown; additions survive disappearance."""
@@ -48,6 +90,7 @@ class CollectorContract(unittest.TestCase):
                 with self.assertRaises((ValueError,EOFError,OSError)):
                     store.ingest('com',io.BytesIO(data),1100000,minimum=1)
                 self.assertEqual(store.db.execute('SELECT checked FROM zones WHERE zone="com"').fetchone()[0],1000000)
+                self.assertFalse((Path(directory)/'stage.sqlite').exists())
             store.close()
 
     def test_missing_history_requires_initialization(self):
@@ -147,6 +190,39 @@ class CollectorContract(unittest.TestCase):
                 with self.assertRaises(czds.CollectorDeadline):
                     czds.ensure_deadline()
             store.db.set_progress_handler(None,0)
+            store.close()
+
+    @unittest.skipUnless(Path('/proc/self/fd').is_dir(),'Linux collector temporary-file accounting')
+    def test_unlinked_sort_runs_count_once(self):
+        """Unlinked sorter files consume the budget, including duplicate descriptors."""
+        with tempfile.TemporaryDirectory() as directory:
+            store=czds.Store(Path(directory),reserve_bytes=0)
+            store.initialize()
+            linked=sum(path.stat().st_size for path in Path(directory).iterdir() if path.is_file())
+            with tempfile.TemporaryFile(dir=directory) as scratch:
+                scratch.truncate(4<<20)
+                duplicate=os.dup(scratch.fileno())
+                try:
+                    with mock.patch.object(czds,'STATE_LIMIT',linked+(6<<20)):
+                        store.check_budget()
+                    with mock.patch.object(czds,'STATE_LIMIT',linked+(2<<20)):
+                        with self.assertRaises(ValueError):
+                            store.check_budget()
+                finally:
+                    os.close(duplicate)
+            store.close()
+
+    def test_adjacent_suppression_and_non_adjacent_deduplication(self):
+        """Bound repeated grouped delegations while keeping final SQL deduplication."""
+        data=zone_file(['old','other','old'])
+        hashes=list(czds.records(io.BytesIO(data),'com',lambda:None))
+        self.assertEqual(len(hashes),3)
+        self.assertEqual(hashes[0],hashes[2])
+        with tempfile.TemporaryDirectory() as directory:
+            store=czds.Store(Path(directory),reserve_bytes=0)
+            store.initialize()
+            store.ingest('com',io.BytesIO(data),1000000,minimum=1)
+            self.assertEqual(store.db.execute('SELECT count FROM zones').fetchone()[0],2)
             store.close()
 
 

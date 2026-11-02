@@ -13,6 +13,7 @@ import re
 import shutil
 import signal
 import sqlite3
+import stat
 import struct
 import sys
 import time
@@ -25,6 +26,7 @@ AUTH = 'https://account-api.icann.org/api/authenticate'
 API = 'https://czds-api.icann.org'
 GIB = 1 << 30
 HISTORY_LIMIT = 12 * GIB
+STAGE_LIMIT = 16 * GIB
 STATE_LIMIT = 40 * GIB
 MAX_RECORDS = 10_000_000
 WINDOW = 90 * 86400
@@ -76,6 +78,11 @@ def sync_directory(path):
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def emit_event(event, **details):
+    """Log only fixed event names and non-sensitive acquisition metadata."""
+    print(json.dumps({'event':event,**details}),flush=True)
 
 
 class LimitedReader:
@@ -185,13 +192,42 @@ def records(raw, zone, check_budget, metadata=None):
 class Store:
     """Own durable history, acquisition ledger and atomic publications."""
 
-    def __init__(self, root, reserve_bytes=20 * GIB):
+    def __init__(self, root, reserve_bytes=20 * GIB, reporter=None):
         """Configure budgets without implicitly creating a new baseline."""
         self.root, self.reserve_bytes, self.db = Path(root), reserve_bytes, None
+        self.reporter = reporter
+
+    def state_bytes(self):
+        """Count linked state and open unlinked SQLite sorter files once per inode."""
+        total,seen=0,set()
+        for path in self.root.iterdir():
+            info=path.stat()
+            identity=(info.st_dev,info.st_ino)
+            if stat.S_ISREG(info.st_mode) and identity not in seen:
+                total+=info.st_size
+                seen.add(identity)
+        descriptors=Path('/proc/self/fd')
+        if sys.platform=='linux' and not descriptors.is_dir():
+            raise ValueError('Linux temporary-file accounting requires /proc/self/fd')
+        prefix=str(self.root.resolve())+os.sep
+        if descriptors.is_dir():
+            for descriptor in descriptors.iterdir():
+                try:
+                    target=os.readlink(descriptor)
+                    if not target.startswith(prefix) or not target.endswith(' (deleted)'):
+                        continue
+                    info=descriptor.stat()
+                    identity=(info.st_dev,info.st_ino)
+                    if stat.S_ISREG(info.st_mode) and identity not in seen:
+                        total+=info.st_size
+                        seen.add(identity)
+                except FileNotFoundError:
+                    continue
+        return total
 
     def check_budget(self):
         """Protect host headroom and the complete collector directory budget."""
-        size = sum(path.stat().st_size for path in self.root.iterdir() if path.is_file())
+        size = self.state_bytes()
         if size > STATE_LIMIT or shutil.disk_usage(self.root).free < self.reserve_bytes:
             raise ValueError('CZDS state or host free-space budget exhausted')
 
@@ -219,23 +255,41 @@ class Store:
 
     def connect(self):
         """Bound SQLite cache, database pages and temporary storage behavior."""
-        self.db = sqlite3.connect(self.root/'history.sqlite')
-        self.db.execute('PRAGMA journal_mode=DELETE')
-        self.db.execute('PRAGMA synchronous=FULL')
-        self.db.execute('PRAGMA cache_size=-32768')
-        self.db.execute('PRAGMA temp_store=MEMORY')
-        page = self.db.execute('PRAGMA page_size').fetchone()[0]
-        self.db.execute(f'PRAGMA max_page_count={HISTORY_LIMIT//page}')
+        self.db = self.open_database(self.root/'history.sqlite',HISTORY_LIMIT)
+
+    def open_database(self, path, limit, disposable=False):
+        """Confine external sorting to budgeted storage while keeping history durable."""
+        os.environ['SQLITE_TMPDIR']=str(self.root.resolve())
+        database=sqlite3.connect(path)
+        try:
+            database.execute('PRAGMA journal_mode='+('OFF' if disposable else 'DELETE'))
+            database.execute('PRAGMA synchronous='+('OFF' if disposable else 'FULL'))
+            database.execute('PRAGMA cache_size=-32768')
+            database.execute('PRAGMA temp_store=FILE')
+            database.execute('PRAGMA mmap_size=0')
+            database.execute('PRAGMA threads=0')
+            if disposable:
+                database.execute('PRAGMA auto_vacuum=FULL')
+            page=database.execute('PRAGMA page_size').fetchone()[0]
+            database.execute(f'PRAGMA max_page_count={limit//page}')
+            return database
+        except BaseException:
+            database.close()
+            raise
 
     def close(self):
         """Release history after the collector lock is no longer needed."""
         if self.db is not None:
             self.db.close()
 
+    def attempt_due(self, zone, stamp):
+        """Use one authoritative eligibility check before authentication and reservation."""
+        row = self.db.execute('SELECT stamp FROM attempts WHERE zone=?',(zone,)).fetchone()
+        return row is None or stamp-row[0]>=86400
+
     def begin_attempt(self, zone, stamp):
         """Durably reserve a 24-hour interval before issuing a download."""
-        row = self.db.execute('SELECT stamp FROM attempts WHERE zone=?',(zone,)).fetchone()
-        if row and stamp-row[0] < 86400:
+        if not self.attempt_due(zone,stamp):
             return False
         with self.db:
             self.db.execute('INSERT INTO attempts VALUES(?,?) ON CONFLICT(zone) DO UPDATE SET stamp=excluded.stamp',(zone,stamp))
@@ -246,38 +300,58 @@ class Store:
         self.check_budget()
         stage_path = self.root/'stage.sqlite'
         stage_path.unlink(missing_ok=True)
-        stage = sqlite3.connect(stage_path)
         try:
-            stage.execute('PRAGMA journal_mode=OFF')
-            stage.execute('PRAGMA cache_size=-32768')
-            stage.execute(f'PRAGMA max_page_count={HISTORY_LIMIT//4096}')
-            stage.execute('CREATE TABLE incoming(hash BLOB PRIMARY KEY) WITHOUT ROWID')
+            count,metadata=self.build_stage(stage_path,zone,raw)
+            previous=self.db.execute('SELECT baseline,checked,count FROM zones WHERE zone=?',(zone,)).fetchone()
+            if count<minimum or (previous and (stamp<=previous[1] or count<previous[2]*0.90)):
+                raise ValueError('Zone count/time plausibility gate failed')
+            self.merge_stage(stage_path,zone,stamp,previous,count,metadata)
+        finally:
+            stage_path.unlink(missing_ok=True)
+
+    def build_stage(self, path, zone, raw):
+        """Append first, then externally sort and compact unique hashes before merging."""
+        stage=self.open_database(path,STAGE_LIMIT,disposable=True)
+        stage.set_progress_handler(self.progress,100000)
+        try:
+            stage.execute('CREATE TABLE incoming_raw(hash BLOB NOT NULL)')
             batch, metadata = [], {}
+            rows=0
             for digest in records(raw,zone,self.check_budget,metadata):
                 batch.append((digest,))
+                rows+=1
                 if len(batch) == 10000:
-                    stage.executemany('INSERT OR IGNORE INTO incoming VALUES(?)',batch)
+                    stage.executemany('INSERT INTO incoming_raw VALUES(?)',batch)
                     batch.clear()
-            stage.executemany('INSERT OR IGNORE INTO incoming VALUES(?)',batch)
+            stage.executemany('INSERT INTO incoming_raw VALUES(?)',batch)
             stage.commit()
-            count = stage.execute('SELECT COUNT(*) FROM incoming').fetchone()[0]
+            if self.reporter:
+                self.reporter('czds_stage_parsed',zone=zone,hash_rows=rows)
+            stage.execute('CREATE TABLE incoming(hash BLOB PRIMARY KEY) WITHOUT ROWID')
+            stage.execute('INSERT OR IGNORE INTO incoming SELECT hash FROM incoming_raw ORDER BY hash')
+            stage.execute('DROP TABLE incoming_raw')
+            stage.commit()
+            count=stage.execute('SELECT COUNT(*) FROM incoming').fetchone()[0]
+            if self.reporter:
+                self.reporter('czds_stage_sorted',zone=zone,domains=count)
+            return count,metadata
         finally:
+            stage.set_progress_handler(None,0)
             stage.close()
-        previous = self.db.execute('SELECT baseline,checked,count FROM zones WHERE zone=?',(zone,)).fetchone()
-        if count < minimum or (previous and (stamp <= previous[1] or count < previous[2]*0.90)):
-            raise ValueError('Zone count/time plausibility gate failed')
+
+    def merge_stage(self, stage_path, zone, stamp, previous, count, metadata):
+        """Publish validated provenance and ordered observations in one durable transaction."""
         self.check_budget()
         self.db.execute('ATTACH DATABASE ? AS staging',(str(stage_path),))
         self.db.set_progress_handler(self.progress,100000)
         try:
             with self.db:
-                self.db.execute('INSERT OR IGNORE INTO history SELECT ?,hash,? FROM staging.incoming',(zone,stamp if previous else 0))
+                self.db.execute('INSERT OR IGNORE INTO history SELECT ?,hash,? FROM staging.incoming ORDER BY hash',(zone,stamp if previous else 0))
                 self.db.execute('INSERT INTO zones(zone,baseline,checked,count) VALUES(?,?,?,?) ON CONFLICT(zone) DO UPDATE SET checked=excluded.checked,count=excluded.count',(zone,previous[0] if previous else stamp,stamp,count))
                 self.db.execute('INSERT INTO acquisitions VALUES(?,?,?)',(zone,stamp,json.dumps(metadata)))
         finally:
             self.db.set_progress_handler(None,0)
             self.db.execute('DETACH DATABASE staging')
-            stage_path.unlink(missing_ok=True)
 
     def progress(self):
         """Interrupt long SQL operations when host storage headroom disappears."""
@@ -399,7 +473,7 @@ def main():
     args.state.mkdir(parents=True,exist_ok=True)
     with (args.state/'collector.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        store = Store(args.state)
+        store = Store(args.state,reporter=emit_event)
         try:
             if args.initialize:
                 store.initialize()
@@ -416,21 +490,24 @@ def main():
             client = Client(args.credentials)
             client.authenticate()
             links = client.links()
-            print(json.dumps({'event':'czds_approval_status','available':sorted(links),'pending':sorted(set(ZONES)-set(links))}),flush=True)
+            emit_event('czds_approval_status',available=sorted(links),pending=sorted(set(ZONES)-set(links)))
             failures = 0
             for zone,url in sorted(links.items()):
                 ensure_deadline()
+                if not store.attempt_due(zone,int(time.time())):
+                    continue
+                client.authenticate()
                 if not store.begin_attempt(zone,int(time.time())):
                     continue
                 try:
                     with client.get(url) as response:
                         store.ingest(zone,response,int(time.time()),minimum=minima[zone])
                     store.publish(args.output,int(time.time()))
-                    print(json.dumps({'event':'czds_import_completed','zone':zone}),flush=True)
+                    emit_event('czds_import_completed',zone=zone)
                 except Exception:
                     ensure_deadline()
                     failures += 1
-                    print(json.dumps({'event':'czds_import_failed','zone':zone,'detail':'last committed evidence retained; next attempt no earlier than 24 hours'}),flush=True)
+                    emit_event('czds_import_failed',zone=zone,detail='last committed evidence retained; next attempt no earlier than 24 hours')
             if failures:
                 raise ValueError('One or more CZDS imports failed')
         finally:

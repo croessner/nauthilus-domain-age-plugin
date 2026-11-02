@@ -50,7 +50,7 @@ func NauthilusPlugin() (api.Plugin, error) { return &Plugin{}, nil }
 
 // Metadata declares a fact-only decision component and optional observation effect.
 func (*Plugin) Metadata() api.Metadata {
-	return api.Metadata{Name: "domain_age", Version: "0.1.3", APIVersion: api.APIVersion, Description: "Domain registration and independent first-seen intelligence", Features: []api.Feature{"decision_fact_provider", "decision_effect_provider", "reconfigure"}, Build: api.BuildInfo{ArtifactIdentity: api.NativeArtifactIdentity(), GoVersion: runtime.Version(), GitCommit: buildCommit, BuildTime: buildTime, BuildTags: []string{buildTags}}}
+	return api.Metadata{Name: "domain_age", Version: "0.1.4", APIVersion: api.APIVersion, Description: "Domain registration and independent first-seen intelligence", Features: []api.Feature{"decision_fact_provider", "decision_effect_provider", "reconfigure"}, Build: api.BuildInfo{ArtifactIdentity: api.NativeArtifactIdentity(), GoVersion: runtime.Version(), GitCommit: buildCommit, BuildTime: buildTime, BuildTags: []string{buildTags}}}
 }
 
 // Register validates all inputs before exposing a complete assessment component.

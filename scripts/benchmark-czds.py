@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 
-from czds import Store
+from czds import Store,emit_event
 
 
 def write_zone(path, count):
@@ -30,7 +30,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='czds-benchmark-',dir=options.directory) as name:
         root = Path(name)
         state, publication = root/'state',root/'publication'
-        store = Store(state,reserve_bytes=0)
+        store = Store(state,reserve_bytes=0,reporter=emit_event)
         store.initialize()
         peak = [0]
         original = store.check_budget
@@ -38,13 +38,14 @@ def main():
         def measured_budget():
             """Include transient stage and rollback journal files in the peak."""
             original()
-            peak[0] = max(peak[0],sum(path.stat().st_size for path in state.iterdir() if path.is_file()))
+            peak[0] = max(peak[0],store.state_bytes())
 
         store.check_budget = measured_budget
         measurements = []
         for label,count,stamp in [('baseline',options.count,1000000),('update',options.count+options.count//100,1100000)]:
             path = root/'zone.gz'
             write_zone(path,count)
+            emit_event('benchmark_zone_generated',domains=count)
             started = time.monotonic()
             with path.open('rb') as source:
                 store.ingest('com',source,stamp,minimum=1)
