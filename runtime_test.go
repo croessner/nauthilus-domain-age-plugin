@@ -195,3 +195,11 @@ func TestImporterPreservesDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestExpiredBootstrapDoesNotBlockPluginRegistration preserves local tracking during routing outages.
+func TestExpiredBootstrapDoesNotBlockPluginRegistration(t *testing.T) {
+	cfg := configuration{RDAP: map[string]string{"com": "https://registry.example/rdap"}, RDAPBootstrapUpdatedAt: time.Now().Add(-31 * 24 * time.Hour).UTC().Format(time.RFC3339)}
+	if err := validateBootstrap(cfg); err != nil {
+		t.Fatalf("expired routing must disable lookups rather than the plugin: %v", err)
+	}
+}

@@ -26,10 +26,16 @@ import (
 
 // TestReferencePolicyNormalizes validates caller admission, schemas, schedules and rule vocabulary.
 func TestReferencePolicyNormalizes(t *testing.T) {
-	file, err := os.Open("examples/policy.json")
+	path := os.Getenv("NAUTHILUS_DOMAIN_AGE_POLICY_FILE")
+	if path == "" {
+		path = "examples/policy.json"
+	}
+
+	file, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer func() { _ = file.Close() }()
 
 	document, err := policyconfig.Decode("json", file)

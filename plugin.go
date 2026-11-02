@@ -28,15 +28,17 @@ type configuration struct {
 	RDAP                   map[string]string `mapstructure:"rdap"`
 	MaxAge                 time.Duration     `mapstructure:"max_age"`
 	Tracking               bool              `mapstructure:"tracking"`
+	AutomaticRDAPBootstrap bool              `mapstructure:"automatic_rdap_bootstrap"`
 }
 
 // Plugin coordinates immutable imports and optional bounded online enrichment.
 type Plugin struct {
-	data   *snapshot
-	rdap   *rdapClient
-	host   api.Host
-	config configuration
-	mu     sync.RWMutex
+	bootstrapCancel context.CancelFunc
+	data            *snapshot
+	rdap            *rdapClient
+	host            api.Host
+	config          configuration
+	mu              sync.RWMutex
 }
 
 // NauthilusPlugin exposes the native plugin factory.
@@ -44,7 +46,7 @@ func NauthilusPlugin() (api.Plugin, error) { return &Plugin{}, nil }
 
 // Metadata declares a fact-only decision component and optional observation effect.
 func (*Plugin) Metadata() api.Metadata {
-	return api.Metadata{Name: "domain_age", Version: "0.1.0", APIVersion: api.APIVersion, Description: "Domain registration and independent first-seen intelligence", Features: []api.Feature{"decision_fact_provider", "decision_effect_provider", "reconfigure"}, Build: api.BuildInfo{ArtifactIdentity: api.NativeArtifactIdentity(), GoVersion: runtime.Version(), GitCommit: buildCommit, BuildTime: buildTime, BuildTags: []string{buildTags}}}
+	return api.Metadata{Name: "domain_age", Version: "0.1.1", APIVersion: api.APIVersion, Description: "Domain registration and independent first-seen intelligence", Features: []api.Feature{"decision_fact_provider", "decision_effect_provider", "reconfigure"}, Build: api.BuildInfo{ArtifactIdentity: api.NativeArtifactIdentity(), GoVersion: runtime.Version(), GitCommit: buildCommit, BuildTime: buildTime, BuildTags: []string{buildTags}}}
 }
 
 // Register validates all inputs before exposing a complete assessment component.
@@ -71,6 +73,9 @@ func (p *Plugin) Register(registrar api.Registrar) error {
 	if err != nil {
 		return err
 	}
+
+	rdap.automatic = cfg.AutomaticRDAPBootstrap
+	rdap.bootstrapUpdatedAt, _ = time.Parse(time.RFC3339, cfg.RDAPBootstrapUpdatedAt)
 
 	decision, ok := registrar.(api.DecisionRegistrar)
 	if !ok {
@@ -109,11 +114,19 @@ func (p *Plugin) Start(ctx context.Context, host api.Host) error {
 	p.host = host
 	p.mu.Unlock()
 
+	if p.config.AutomaticRDAPBootstrap {
+		p.startBootstrap(host)
+	}
+
 	return nil
 }
 
 // Stop releases pooled outbound connections after host request draining.
 func (p *Plugin) Stop(context.Context) error {
+	if p.bootstrapCancel != nil {
+		p.bootstrapCancel()
+	}
+
 	if p.rdap != nil {
 		p.rdap.client.CloseIdleConnections()
 	}
@@ -173,9 +186,9 @@ func (a assessment) Collect(ctx context.Context, request api.DecisionFactRequest
 	record, found := data.byDomain[domain]
 	mergeImport(values, record, found, now, cfg.MaxAge)
 
-	if (!found || record.RegisteredAt == nil || values[valueRegistrationState] == valueStale) && len(cfg.RDAP) > 0 {
-		result := rdapResult{state: "bootstrap_stale"}
-		if validateBootstrap(cfg) == nil {
+	if (!found || record.RegisteredAt == nil || values[valueRegistrationState] == valueStale) && (len(cfg.RDAP) > 0 || cfg.AutomaticRDAPBootstrap) {
+		result := rdapResult{state: stateBootstrapStale}
+		if cfg.AutomaticRDAPBootstrap || bootstrapFresh(cfg) {
 			result = p.rdap.lookup(ctx, domain, cfg.MaxAge)
 		}
 
@@ -265,7 +278,7 @@ func (p *Plugin) prepareReplacement(input api.ConfigView) (configuration, *snaps
 	old := p.config
 	p.mu.RUnlock()
 
-	if cfg.Tracking != old.Tracking || !reflect.DeepEqual(cfg.RDAP, old.RDAP) {
+	if cfg.Tracking != old.Tracking || cfg.AutomaticRDAPBootstrap != old.AutomaticRDAPBootstrap || !reflect.DeepEqual(cfg.RDAP, old.RDAP) {
 		return cfg, nil, fmt.Errorf("service configuration: %w", api.ErrRestartRequired)
 	}
 
@@ -325,18 +338,24 @@ func mergeImport(values map[string]any, record domainRecord, found bool, now tim
 	}
 }
 
-// validateBootstrap expires operator-pinned registry routing after thirty days.
+// validateBootstrap rejects malformed routing metadata without blocking startup for expired data.
 func validateBootstrap(cfg configuration) error {
 	if len(cfg.RDAP) == 0 {
 		return nil
 	}
 
 	updated, err := time.Parse(time.RFC3339, cfg.RDAPBootstrapUpdatedAt)
-	if err != nil || updated.After(time.Now()) || time.Since(updated) > 30*24*time.Hour {
+	if err != nil || updated.After(time.Now()) {
 		return errInput
 	}
 
 	return nil
+}
+
+// bootstrapFresh disables static online routing once its acquisition age exceeds thirty days.
+func bootstrapFresh(cfg configuration) bool {
+	updated, err := time.Parse(time.RFC3339, cfg.RDAPBootstrapUpdatedAt)
+	return err == nil && !updated.After(time.Now()) && time.Since(updated) <= bootstrapMaxAge
 }
 
 // sortedKeys makes native descriptors and emitted fact order independent of map iteration.

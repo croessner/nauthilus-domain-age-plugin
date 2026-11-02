@@ -29,26 +29,37 @@ type rdapResult struct {
 
 // rdapClient serializes bounded registry traffic and owns a fixed-capacity cache.
 type rdapClient struct {
-	endpoints map[string]string
-	cache     map[string]rdapResult
-	client    *http.Client
-	next      time.Time
-	mu        sync.Mutex
+	endpoints          map[string]string
+	cache              map[string]rdapResult
+	client             *http.Client
+	next               time.Time
+	bootstrapUpdatedAt time.Time
+	mu                 sync.Mutex
+	automatic          bool
 }
 
 // newRDAPClient accepts only operator-pinned HTTPS registry bases and never follows redirects.
 func newRDAPClient(endpoints map[string]string) (*rdapClient, error) {
-	for tld, base := range endpoints {
-		parsed, err := url.Parse(base)
-		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.ContainsAny(tld, "./:") {
-			return nil, errInput
-		}
+	if err := validateEndpoints(endpoints); err != nil {
+		return nil, err
 	}
 
 	transport := &http.Transport{DialContext: publicDial, TLSHandshakeTimeout: time.Second, MaxIdleConns: 4, IdleConnTimeout: time.Minute}
 	client := &http.Client{Transport: transport, Timeout: 1500 * time.Millisecond, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 	return &rdapClient{endpoints: endpoints, cache: make(map[string]rdapResult), client: client}, nil
+}
+
+// validateEndpoints admits only credential-free HTTPS registry routes.
+func validateEndpoints(endpoints map[string]string) error {
+	for tld, base := range endpoints {
+		parsed, err := url.Parse(base)
+		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.ContainsAny(tld, "./:") {
+			return errInput
+		}
+	}
+
+	return nil
 }
 
 // publicDial pins each connection to a resolved public address, preventing DNS rebinding into local networks.
@@ -107,6 +118,10 @@ func (c *rdapClient) lookup(ctx context.Context, domain string, maxAge time.Dura
 		return cached
 	}
 
+	if state := c.bootstrapState(now); state != "" {
+		return rdapResult{state: state}
+	}
+
 	_, tld, _ := strings.Cut(domain, ".")
 	// Public suffixes can contain multiple labels; choose the final TLD for RDAP bootstrap.
 	labels := strings.Split(tld, ".")
@@ -130,6 +145,23 @@ func (c *rdapClient) lookup(ctx context.Context, domain string, maxAge time.Dura
 	c.cache[domain] = result
 
 	return result
+}
+
+// bootstrapState checks automatic routing freshness while the caller holds the client lock.
+func (c *rdapClient) bootstrapState(now time.Time) string {
+	if !c.automatic {
+		return ""
+	}
+
+	if c.bootstrapUpdatedAt.IsZero() {
+		return "bootstrap_unavailable"
+	}
+
+	if now.Sub(c.bootstrapUpdatedAt) > bootstrapMaxAge {
+		return stateBootstrapStale
+	}
+
+	return ""
 }
 
 // fetch validates status and a bounded body without allowing caller-controlled URLs.

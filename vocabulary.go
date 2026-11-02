@@ -40,3 +40,5 @@ const valueObserveSenderDomain = "observe-sender-domain"
 const effectRecord = "record"
 
 const valueObservationID = "resource.mail.observation_id"
+
+const stateBootstrapStale = "bootstrap_stale"

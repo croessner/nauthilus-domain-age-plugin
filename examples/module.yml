@@ -17,6 +17,8 @@ plugins:
         database: /var/lib/nauthilus/domain-age.json
         max_age: 48h
         tracking: true
+        # Enable free, daily refresh of official IANA RDAP routing.
+        automatic_rdap_bootstrap: true
         rdap: {}
         # Optional: refresh these operator-pinned IANA registry routes within 30 days.
         # rdap_bootstrap_updated_at: "2026-11-02T08:00:00Z"
