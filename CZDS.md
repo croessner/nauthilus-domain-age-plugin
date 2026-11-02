@@ -24,7 +24,8 @@ only decision authority; this feed never introduces a mail rejection.
 ## Private state and bounded publication
 
 Run exactly one collector using a private persistent local filesystem. Do not
-put the live SQLite history on a shared filesystem. The initialization command
+put the live SQLite history on a shared filesystem. Each collector process
+owns one state root; select a different root only in a new process. The initialization command
 is explicit; ordinary runs refuse to create a baseline after state loss.
 Store backups must preserve `history.sqlite` and `initialized` together while
 the collector is stopped (or use SQLite's online backup API). Never copy a

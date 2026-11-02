@@ -12,7 +12,6 @@ from pathlib import Path
 import re
 import shutil
 import signal
-import sqlite3
 import stat
 import struct
 import sys
@@ -259,7 +258,13 @@ class Store:
 
     def open_database(self, path, limit, disposable=False):
         """Confine external sorting to budgeted storage while keeping history durable."""
-        os.environ['SQLITE_TMPDIR']=str(self.root.resolve())
+        directory=str(self.root.resolve())
+        # SQLite retains the environment pointer; do not replace an identical value.
+        if os.environ.get('SQLITE_TMPDIR')!=directory:
+            os.environ['SQLITE_TMPDIR']=directory
+        # Initialize the driver only after selecting its private temporary location.
+        import sqlite3
+
         database=sqlite3.connect(path)
         try:
             database.execute('PRAGMA journal_mode='+('OFF' if disposable else 'DELETE'))
@@ -323,6 +328,8 @@ class Store:
                 if len(batch) == 10000:
                     stage.executemany('INSERT INTO incoming_raw VALUES(?)',batch)
                     batch.clear()
+                    if self.reporter and rows%1000000==0:
+                        self.reporter('czds_stage_parse_progress',zone=zone,hash_rows=rows)
             stage.executemany('INSERT INTO incoming_raw VALUES(?)',batch)
             stage.commit()
             if self.reporter:

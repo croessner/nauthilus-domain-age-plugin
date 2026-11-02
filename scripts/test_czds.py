@@ -4,8 +4,8 @@ import io
 import os
 from pathlib import Path
 import struct
-import sqlite3
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -180,6 +180,8 @@ class CollectorContract(unittest.TestCase):
 
     def test_sqlite_deadline_translation_remains_fatal(self):
         """SQLite callback translation cannot consume the complete-run deadline."""
+        import sqlite3
+
         with tempfile.TemporaryDirectory() as directory:
             store = czds.Store(Path(directory),reserve_bytes=0)
             store.initialize()
@@ -211,6 +213,43 @@ class CollectorContract(unittest.TestCase):
                 finally:
                     os.close(duplicate)
             store.close()
+
+    @unittest.skipUnless(Path('/proc/self/fd').is_dir(),'Linux SQLite temporary-directory initialization')
+    def test_external_sort_files_stay_inside_state(self):
+        """The real driver must select state storage before caching its temp directory."""
+        program='''import os,tempfile
+os.environ.pop("SQLITE_TMPDIR",None)
+from pathlib import Path
+from czds import Store
+with tempfile.TemporaryDirectory() as name:
+ root=Path(name)
+ store=Store(root,reserve_bytes=0)
+ store.initialize()
+ stage=store.open_database(root/"sort.sqlite",16<<20,disposable=True)
+ stage.execute("PRAGMA cache_size=-128")
+ stage.execute("CREATE TABLE raw(hash BLOB)")
+ stage.execute("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<100000) INSERT INTO raw SELECT randomblob(32) FROM n")
+ stage.commit()
+ seen=set()
+ def progress():
+  """Inspect synthetic sorter descriptors without reading their contents."""
+  for descriptor in Path("/proc/self/fd").iterdir():
+   try:
+    target=os.readlink(descriptor)
+    if "etilqs_" in target:seen.add(target)
+   except FileNotFoundError:pass
+  return 0
+ stage.set_progress_handler(progress,1000)
+ stage.execute("CREATE TABLE incoming(hash BLOB PRIMARY KEY) WITHOUT ROWID")
+ stage.execute("INSERT INTO incoming SELECT hash FROM raw ORDER BY hash")
+ stage.commit()
+ assert seen,"external sorter was not exercised"
+ assert all(target.startswith(str(root)+"/") for target in seen),"sorter escaped state storage"
+ stage.close()
+ store.close()
+'''
+        result=subprocess.run([sys.executable,'-c',program],cwd=Path(__file__).resolve().parent,capture_output=True,text=True)
+        self.assertEqual(result.returncode,0,result.stderr)
 
     def test_adjacent_suppression_and_non_adjacent_deduplication(self):
         """Bound repeated grouped delegations while keeping final SQL deduplication."""
