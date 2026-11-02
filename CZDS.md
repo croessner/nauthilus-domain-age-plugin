@@ -88,9 +88,8 @@ enrollment helper accepts the existing password through a hidden terminal
 prompt and writes only SOPS ciphertext; never paste credentials into chat.
 The ICANN token stays in process memory. HTTPS destinations are fixed, proxies
 and redirects are disabled, and neither response bodies nor credentials are
-logged. Authenticate for link listing and before each eligible download, at
-most eleven times per run; a long import never reuses an expired token for
-the next zone. Data requests are never retried. Credentials are not needed
+logged. Authenticate for link listing and immediately before the one selected
+download, at most twice per run. Data requests are never retried. Credentials are not needed
 for synthetic validation.
 
 Review plausible minimum delegation counts for every zone before initial
@@ -117,3 +116,14 @@ updating only the mounted Secret, not source code.
 Test with `make test-collector`; the pinned collector image also runs these
 tests during its build. Native tests run within the exact pinned Nauthilus
 checkout through the normal plugin guardrails.
+
+## Fair bounded scheduling
+
+Each invocation downloads at most one eligible approved zone. Never-attempted
+zones take priority, followed by the oldest durable attempt timestamp and zone
+name as a deterministic tie-breaker. The six-hour whole-run budget includes
+startup, publication recovery and the selected zone. Failed or interrupted attempts still consume their
+24-hour slot; a large earlier zone cannot repeatedly strand another zone near
+the end of a shared deadline. The hourly CronJob supplies subsequent runs.
+Authentication occurs for listing and immediately before the selected transfer,
+at most twice per run. Staging, parsing, merging and index formats are unchanged.

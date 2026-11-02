@@ -292,6 +292,12 @@ class Store:
         row = self.db.execute('SELECT stamp FROM attempts WHERE zone=?',(zone,)).fetchone()
         return row is None or stamp-row[0]>=86400
 
+    def next_zone(self, approved, stamp):
+        """Select the oldest eligible attempt, prioritizing never-attempted zones."""
+        attempts=dict(self.db.execute('SELECT zone,stamp FROM attempts'))
+        candidates=[(attempts.get(zone,-1),zone) for zone in approved if self.attempt_due(zone,stamp)]
+        return min(candidates)[1] if candidates else None
+
     def begin_attempt(self, zone, stamp):
         """Durably reserve a 24-hour interval before issuing a download."""
         if not self.attempt_due(zone,stamp):
@@ -498,25 +504,22 @@ def main():
             client.authenticate()
             links = client.links()
             emit_event('czds_approval_status',available=sorted(links),pending=sorted(set(ZONES)-set(links)))
-            failures = 0
-            for zone,url in sorted(links.items()):
+            zone=store.next_zone(links,int(time.time()))
+            if zone is None:
+                return
+            ensure_deadline()
+            client.authenticate()
+            if not store.begin_attempt(zone,int(time.time())):
+                return
+            try:
+                with client.get(links[zone]) as response:
+                    store.ingest(zone,response,int(time.time()),minimum=minima[zone])
+                store.publish(args.output,int(time.time()))
+                emit_event('czds_import_completed',zone=zone)
+            except Exception:
                 ensure_deadline()
-                if not store.attempt_due(zone,int(time.time())):
-                    continue
-                client.authenticate()
-                if not store.begin_attempt(zone,int(time.time())):
-                    continue
-                try:
-                    with client.get(url) as response:
-                        store.ingest(zone,response,int(time.time()),minimum=minima[zone])
-                    store.publish(args.output,int(time.time()))
-                    emit_event('czds_import_completed',zone=zone)
-                except Exception:
-                    ensure_deadline()
-                    failures += 1
-                    emit_event('czds_import_failed',zone=zone,detail='last committed evidence retained; next attempt no earlier than 24 hours')
-            if failures:
-                raise ValueError('One or more CZDS imports failed')
+                emit_event('czds_import_failed',zone=zone,detail='last committed evidence retained; next attempt no earlier than 24 hours')
+                raise ValueError('CZDS import failed') from None
         finally:
             store.close()
 

@@ -24,15 +24,16 @@ def zone_file(names):
 class CollectorContract(unittest.TestCase):
     """Keep baselines, historic observations and publications independent."""
 
-    def test_each_eligible_download_has_fresh_authentication(self):
-        """Long zone processing cannot leave the next download with an expired token."""
+    def test_selected_download_has_fresh_authentication(self):
+        """Select only one zone and authenticate immediately before its transfer."""
         class ExpiringClient:
-            """Model a token that expires during processing of each completed zone."""
+            """Model listing credentials expiring before the selected transfer."""
 
             def __init__(self):
                 """Keep authentication state independent of test account files."""
                 self.fresh=False
                 self.logins=0
+                self.downloads=[]
 
             def authenticate(self):
                 """Issue one fresh token without exposing a credential value."""
@@ -40,7 +41,8 @@ class CollectorContract(unittest.TestCase):
                 self.logins+=1
 
             def links(self):
-                """Return two approved zones so a long first import affects the second."""
+                """Return two approved zones while expiring the listing token."""
+                self.fresh=False
                 return {zone:czds.API+'/czds/downloads/'+zone+'.zone' for zone in ['com','org']}
 
             def get(self,url):
@@ -48,6 +50,7 @@ class CollectorContract(unittest.TestCase):
                 if not self.fresh:
                     raise ValueError('expired test token')
                 self.fresh=False
+                self.downloads.append(url)
                 return io.BytesIO(b'unused synthetic body')
 
         with tempfile.TemporaryDirectory() as directory:
@@ -62,7 +65,25 @@ class CollectorContract(unittest.TestCase):
             arguments=['czds','--state',str(root),'--output',str(root/'pub'),'--credentials','unused','--minimum-counts',str(minimum)]
             with mock.patch.object(sys,'argv',arguments),mock.patch.object(czds,'Client',return_value=client),mock.patch.object(czds,'Store',side_effect=lambda path,reporter=None:original(path,reserve_bytes=0,reporter=reporter)),mock.patch.object(original,'ingest'),mock.patch.object(czds.signal,'signal'),mock.patch.object(czds.signal,'alarm'),mock.patch.object(czds,'RUN_DEADLINE',None),mock.patch.object(czds,'DEADLINE_EXPIRED',False):
                 czds.main()
-            self.assertLessEqual(client.logins,1+len(czds.ZONES))
+            self.assertEqual(client.logins,2)
+            self.assertEqual(len(client.downloads),1)
+
+    def test_selection_prioritizes_unattempted_then_oldest_due_zone(self):
+        """Long or failed zones cannot repeatedly consume the next zone's runtime."""
+        with tempfile.TemporaryDirectory() as directory:
+            store=czds.Store(Path(directory),reserve_bytes=0)
+            store.initialize()
+            approved={'biz','com','org'}
+            self.assertEqual(store.next_zone(approved,1000000),'biz')
+            self.assertTrue(store.begin_attempt('biz',1000000))
+            self.assertEqual(store.next_zone(approved,1100000),'com')
+            self.assertTrue(store.begin_attempt('com',1100000))
+            self.assertEqual(store.next_zone(approved,1200000),'org')
+            self.assertTrue(store.begin_attempt('org',1200000))
+            self.assertEqual(store.next_zone(approved,1200001),'biz')
+            self.assertEqual(store.next_zone({'org'},1200001),None)
+            self.assertEqual(store.next_zone({'com','org'},1300000),'com')
+            store.close()
 
     def test_baseline_addition_reappearance(self):
         """Initial domains stay unknown; additions survive disappearance."""
