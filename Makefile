@@ -4,6 +4,9 @@
 # vet and lint run happens inside a clean clone of the Nauthilus core at
 # CORE_REF with this repository copied to contrib/plugins/domain-age.
 
+# Development actions reset the same exact-core checkout and must run serially.
+.NOTPARALLEL:
+
 GO ?= go
 GO_VERSION ?= 1.27.3
 ALPINE_VERSION ?= 3.24
